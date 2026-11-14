@@ -1,0 +1,18 @@
+figures-go
+Copyright 2026 the figures-go authors
+
+Licensed under the Apache License, Version 2.0 (LICENSE).
+
+This repository also contains work under other licences, each kept with it:
+
+- fonts/FreeSans*.ttf: GNU FreeFont, GPLv3 with the font exception
+  (fonts/FreeFont.copyright).
+- fonts/DejaVuSans*.ttf: DejaVu Sans, Bitstream Vera licence and public
+  domain additions (fonts/DejaVu.copyright).
+- internal/page/mermaid.min.js: Mermaid 11.16.1, MIT
+  (internal/page/mermaid.LICENSE).
+
+The growth and blood pressure reference tables in internal/chart/refdata.go
+are published reference data: the WHO Child Growth Standards and the CDC
+2000 growth charts as the CDC distributes them, and the AAP 2017 paediatric
+blood pressure tables (Flynn et al.). Their sources are listed in that file.

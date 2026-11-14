@@ -1,0 +1,15 @@
+{"type":"flowchart","title":"First hour of an acute asthma attack in a 7-year-old","alt":"Assess, give oxygen, grade the attack, treat by severity, give prednisolone and reassess.","caption":"Doses after BTS/SIGN 2019 and GINA 2024 acute asthma guidance.","spec":{"nodes":[
+{"id":"s","text":"7-year-old in acute asthma attack: ABCDE, sit upright, call for senior help","shape":"start","next":"o2"},
+{"id":"o2","text":"Oxygen by mask to keep SpO2 94-98%","next":"as"},
+{"id":"as","text":"Assess severity: SpO2, speech, PEF, HR, RR, consciousness, work of breathing","next":"lt"},
+{"id":"lt","text":"Silent chest, exhaustion, cyanosis or drowsiness?","shape":"decision","yes":"ltx","no":"sv"},
+{"id":"ltx","text":"Life-threatening: ICU and anaesthetist, continuous salbutamol plus ipratropium, IV magnesium","tone":"bad","next":"pred"},
+{"id":"sv","text":"Severe? SpO2 under 92%, cannot complete sentences, PEF under 50%","shape":"decision","yes":"sev","no":"mild"},
+{"id":"sev","text":"Severe: nebulised salbutamol 2.5-5 mg plus ipratropium 0.5 mg, repeat every 20 min","tone":"warn","next":"pred"},
+{"id":"mild","text":"Mild-moderate: salbutamol 2-10 puffs via spacer, repeat every 20 min","tone":"good","next":"pred"},
+{"id":"nt","text":"One puff at a time, 5 breaths each; nebulise if too breathless","shape":"note","next":"mild"},
+{"id":"pred","text":"Prednisolone 1-2 mg/kg by mouth (max 40 mg) within the first hour","tone":"bad","next":"re"},
+{"id":"re","text":"Reassess at 20-30 min: improving?","shape":"decision","yes":"cont","no":"rep"},
+{"id":"cont","text":"Salbutamol every 20-30 min, spacing out as PEF rises","next":"adm"},
+{"id":"rep","text":"Repeat salbutamol with ipratropium, IV magnesium 40-50 mg/kg over 20 min, senior review","tone":"warn","next":"re"},
+{"id":"adm","text":"Admit or observe; steroid for 3-5 days; discharge when PEF over 75% predicted","shape":"end","tone":"good"}]}}

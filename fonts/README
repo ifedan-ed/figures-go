@@ -1,0 +1,12 @@
+The fonts the rasteriser (png.go) draws figures with, and nothing else:
+resvg is run with --skip-system-fonts and this directory.
+
+FreeSans (GNU FreeFont 20211204, Debian fonts-freefont-ttf): GPLv3 with the
+font exception (FreeFont.copyright). Its Latin widths are Helvetica's, which
+the layout measures with (internal/core/text.go), and it covers what medical
+text needs (superscript charges, arrows, ≥, Greek), so resvg never has to
+fall back mid-line.
+
+DejaVu Sans 2.37 (Debian fonts-dejavu-core): Bitstream Vera licence and
+public domain additions (DejaVu.copyright). The fallback for anything
+FreeSans lacks.
