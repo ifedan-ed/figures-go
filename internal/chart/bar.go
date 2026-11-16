@@ -303,11 +303,14 @@ func (d *barDrawing) Draw(c *core.Canvas) error {
 				cap := math.Min(5, bw*0.3)
 				if d.horizontal {
 					cy := (r.y0 + r.y1) / 2
+					// Kept clear of by the reference lines' labels.
+					p.obs.line([]core.Pt{{X: e0, Y: cy}, {X: e1, Y: cy}})
 					c.Line(e0, cy, e1, cy, c.T.Ink, 1.2, "")
 					c.Line(e0, cy-cap, e0, cy+cap, c.T.Ink, 1.2, "")
 					c.Line(e1, cy-cap, e1, cy+cap, c.T.Ink, 1.2, "")
 				} else {
 					cx := (r.x0 + r.x1) / 2
+					p.obs.line([]core.Pt{{X: cx, Y: e0}, {X: cx, Y: e1}})
 					c.Line(cx, e0, cx, e1, c.T.Ink, 1.2, "")
 					c.Line(cx-cap, e0, cx+cap, e0, c.T.Ink, 1.2, "")
 					c.Line(cx-cap, e1, cx+cap, e1, c.T.Ink, 1.2, "")
@@ -318,25 +321,21 @@ func (d *barDrawing) Draw(c *core.Canvas) error {
 			}
 		}
 	}
+	// The lines first, then their labels: a label must keep clear of
+	// every line as well as of the bars (labelValueLine).
 	for _, rl := range d.refs {
 		col := p.refColour(rl.Tone)
 		v := d.val.px(rl.Value)
 		if d.horizontal {
 			c.Line(v, p.r.y0, v, p.r.y1, col, 1.3, "5 4")
-			if rl.Label != "" {
-				c.Text(v+4, p.r.y0-0, rl.Label, core.TextStyle{Size: tickSize, Fill: col, Bold: true, Halo: c.T.Bg})
-			}
+			p.obs.line([]core.Pt{{X: v, Y: p.r.y0}, {X: v, Y: p.r.y1}})
 		} else {
 			c.Line(p.r.x0, v, p.r.x1, v, col, 1.3, "5 4")
-			if rl.Label != "" {
-				x, a := p.r.x1-2, core.End
-				r := textRect(x, v-8, rl.Label, tickSize, true, a)
-				if p.obs.cost(r) > p.obs.cost(textRect(p.r.x0+2, v-8, rl.Label, tickSize, true, core.Start)) {
-					x, a = p.r.x0+2, core.Start
-				}
-				c.Text(x, v-8, rl.Label, core.TextStyle{Size: tickSize, Fill: col, Bold: true, Anchor: a, Halo: c.T.Bg})
-			}
+			p.obs.line([]core.Pt{{X: p.r.x0, Y: v}, {X: p.r.x1, Y: v}})
 		}
+	}
+	for _, rl := range d.refs {
+		p.labelValueLine(d.horizontal, d.val.px(rl.Value), rl.Label, p.refColour(rl.Tone))
 	}
 	c.H = p.bottom
 	return nil
@@ -370,11 +369,13 @@ func (d *barDrawing) drawValueLabel(c *core.Canvas, p *plot, r rect, v float64, 
 		}
 	}
 	if d.horizontal {
-		if v >= 0 {
-			c.Text(r.x1+4, (r.y0+r.y1)/2, text, core.TextStyle{Size: tickSize, Fill: col, Bold: true})
-		} else {
-			c.Text(r.x0-4, (r.y0+r.y1)/2, text, core.TextStyle{Size: tickSize, Fill: col, Bold: true, Anchor: core.End})
+		x, a := r.x1+4, core.Start
+		if v < 0 {
+			x, a = r.x0-4, core.End
 		}
+		c.Text(x, (r.y0+r.y1)/2, text, core.TextStyle{Size: tickSize, Fill: col, Bold: true, Anchor: a})
+		// Kept clear of by the reference lines' labels.
+		p.obs.rect(textRect(x, (r.y0+r.y1)/2, text, tickSize, true, a))
 		return
 	}
 	if r.w() < w-6 {
@@ -385,4 +386,5 @@ func (d *barDrawing) drawValueLabel(c *core.Canvas, p *plot, r rect, v float64, 
 		y = r.y1 + 8
 	}
 	c.Text((r.x0+r.x1)/2, y, text, core.TextStyle{Size: tickSize, Fill: col, Bold: true, Anchor: core.Middle, Halo: c.T.Bg})
+	p.obs.rect(textRect((r.x0+r.x1)/2, y, text, tickSize, true, core.Middle))
 }

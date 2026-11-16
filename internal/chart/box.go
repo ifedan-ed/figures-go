@@ -212,19 +212,17 @@ func (d *boxDrawing) Draw(c *core.Canvas) error {
 	}
 	p.layout(0)
 	p.drawFrame(0)
+	// The lines go under the data; their labels are set after it, where
+	// they cover least (labelValueLine).
 	for _, rl := range d.refs {
 		col := p.refColour(rl.Tone)
 		v := d.val.px(rl.Value)
 		if d.horizontal {
 			c.Line(v, p.r.y0, v, p.r.y1, col, 1.3, "5 4")
-			if rl.Label != "" {
-				c.Text(v+4, p.r.y0-1, rl.Label, core.TextStyle{Size: tickSize, Fill: col, Bold: true, Halo: c.T.Bg})
-			}
+			p.obs.line([]core.Pt{{X: v, Y: p.r.y0}, {X: v, Y: p.r.y1}})
 		} else {
 			c.Line(p.r.x0, v, p.r.x1, v, col, 1.3, "5 4")
-			if rl.Label != "" {
-				c.Text(p.r.x1-2, v-8, rl.Label, core.TextStyle{Size: tickSize, Fill: col, Bold: true, Anchor: core.End, Halo: c.T.Bg})
-			}
+			p.obs.line([]core.Pt{{X: p.r.x0, Y: v}, {X: p.r.x1, Y: v}})
 		}
 	}
 	col := c.T.SeriesColour(0)
@@ -239,7 +237,10 @@ func (d *boxDrawing) Draw(c *core.Canvas) error {
 			}
 			return core.Pt{X: across, Y: d.val.px(v)}
 		}
-		seg := func(a, b core.Pt, w float64, colour string) { c.Line(a.X, a.Y, b.X, b.Y, colour, w, "") }
+		seg := func(a, b core.Pt, w float64, colour string) {
+			c.Line(a.X, a.Y, b.X, b.Y, colour, w, "")
+			p.obs.line([]core.Pt{a, b})
+		}
 		// Whiskers and their caps.
 		seg(at(centre, g.min), at(centre, g.q1), 1.4, c.T.Ink)
 		seg(at(centre, g.q3), at(centre, g.max), 1.4, c.T.Ink)
@@ -249,11 +250,16 @@ func (d *boxDrawing) Draw(c *core.Canvas) error {
 		a, b := at(centre-bw/2, g.q1), at(centre+bw/2, g.q3)
 		r := rect{math.Min(a.X, b.X), math.Min(a.Y, b.Y), math.Max(a.X, b.X), math.Max(a.Y, b.Y)}
 		c.Rect(r.x0, r.y0, r.w(), r.h(), 2, soft, col, 1.4)
+		p.obs.rect(r)
 		seg(at(centre-bw/2, g.median), at(centre+bw/2, g.median), 2.6, col)
 		for _, o := range g.outliers {
 			pt := at(centre, o)
 			c.Circle(pt.X, pt.Y, 3, c.T.Bg, c.T.Ink, 1.3)
+			p.obs.point(pt)
 		}
+	}
+	for _, rl := range d.refs {
+		p.labelValueLine(d.horizontal, d.val.px(rl.Value), rl.Label, p.refColour(rl.Tone))
 	}
 	c.H = p.bottom
 	return nil

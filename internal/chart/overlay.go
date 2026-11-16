@@ -354,3 +354,66 @@ func (p *plot) drawEndLabels(labels []endLabel, size float64) {
 		p.c.Text(x, got[i], l.text, core.TextStyle{Size: size, Fill: l.colour, Bold: true})
 	}
 }
+
+// labelValueLine sets the label of a reference line on a bar or box
+// chart's value axis where it covers least of what is drawn: the bars,
+// boxes, whiskers, value labels and other reference labels already in
+// p.obs. along says the value axis runs along x (horizontal bars), so the
+// line is upright at at; otherwise the line runs across the plot at at.
+//
+// It tries the usual places first (beside the line's top or right end,
+// then its other end) and then walks the line in small steps, so a label
+// finds the gap between bars when the data crosses the line at both ends.
+// Before, a horizontal chart put the label at the top whatever was there,
+// and a vertical one tried only the two ends, and a label could sit on a
+// bar. The label it sets is added to p.obs, so the next one keeps clear.
+func (p *plot) labelValueLine(along bool, at float64, label, colour string) {
+	if label == "" {
+		return
+	}
+	c := p.c
+	inner := p.r.grow(-3)
+	w := core.TextWidth(label, tickSize, true)
+	type cand = struct {
+		x, y float64
+		a    core.Anchor
+	}
+	var cands []cand
+	const step = 6.0
+	if along {
+		// Beside an upright line: right of it, then left, from the top down.
+		top, bottom := p.r.y0+9, p.r.y1-9
+		cands = append(cands, cand{at + 4, top, core.Start}, cand{at - 4, top, core.End})
+		for y := top + step; y <= bottom; y += step {
+			cands = append(cands, cand{at + 4, y, core.Start}, cand{at - 4, y, core.End})
+		}
+	} else {
+		// Just above a line across the plot, then just below it, from the
+		// right end leftwards.
+		right, left := p.r.x1-3, p.r.x0+3
+		for _, dy := range []float64{-8, 8} {
+			cands = append(cands, cand{right, at + dy, core.End}, cand{left, at + dy, core.Start})
+		}
+		for _, dy := range []float64{-8, 8} {
+			for x := right - step; x-w >= left; x -= step {
+				cands = append(cands, cand{x, at + dy, core.End})
+			}
+		}
+	}
+	best, bi := math.Inf(1), 0
+	for i, cd := range cands {
+		r := textRect(cd.x, cd.y, label, tickSize, true, cd.a)
+		// The order is the preference: a later place wins only by covering
+		// less.
+		cost := p.obs.cost(r) + float64(i)*0.001
+		if !r.inside(inner) {
+			cost += 100
+		}
+		if cost < best {
+			best, bi = cost, i
+		}
+	}
+	cd := cands[bi]
+	c.Text(cd.x, cd.y, label, core.TextStyle{Size: tickSize, Fill: colour, Bold: true, Anchor: cd.a, Halo: c.T.Bg})
+	p.obs.rect(textRect(cd.x, cd.y, label, tickSize, true, cd.a))
+}
