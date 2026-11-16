@@ -16,7 +16,13 @@ const (
 type barSeriesSpec struct {
 	Label  string     `json:"label"`
 	Values []*float64 `json:"values"`
+	// Errors are symmetric half-widths: the bar shows value ± error.
 	Errors []*float64 `json:"errors"`
+	// Intervals are each bar's [low, high], for an interval that is not
+	// symmetric about its value: a ratio's confidence interval (RR 1.53,
+	// 0.97 to 2.42) is even on a log scale, not on the bar's. Drawing such
+	// an interval as ± one half-width puts both ends in the wrong place.
+	Intervals [][]float64 `json:"intervals"`
 }
 
 // valueLineSpec is a reference line on a value axis (bars, boxes).
@@ -41,16 +47,19 @@ var barChart = core.Kind{
 	Name:    "bar_chart",
 	Family:  "chart",
 	Use:     "Values compared across named categories (groups, drugs, age bands), grouped or stacked, optionally with error bars; use horizontal for long category names, and line_chart when x is continuous.",
-	Fields:  "categories: [names, each " + core.UpTo(maxCatLabel) + "] 1–24; series: [{label (required if >1; " + core.UpTo(maxSeriesLabel) + "), values: [one number per category, null = none], errors?: [± half-widths, one per category]}] 1–8; orientation?: vertical|horizontal (default vertical); stacked?: bool (no errors when stacked); value_axis?: " + axisFields + " (linear, from zero); category_label? (" + core.UpTo(catTitleChars) + "); value_labels?: bool, writes each value at its bar; reference_lines?: [{value, label? (" + core.UpTo(maxOverlayLab) + "), tone?}] ≤6 on the value axis.",
+	Fields:  "categories: [names, each " + core.UpTo(maxCatLabel) + "] 1–24; series: [{label (required if >1; " + core.UpTo(maxSeriesLabel) + "), values: [one number per category, null = none], errors?: [± half-widths, one per category], or intervals?: [[low, high] as given (for an uneven interval such as a ratio's 95% CI), one per category]; null = none}] 1–8; orientation?: vertical|horizontal (default vertical); stacked?: bool (no errors or intervals when stacked); value_axis?: " + axisFields + " (linear, from zero); category_label? (" + core.UpTo(catTitleChars) + "); value_labels?: bool, writes each value at its bar; reference_lines?: [{value, label? (" + core.UpTo(maxOverlayLab) + "), tone?}] ≤6 on the value axis.",
 	Example: `{"type":"bar_chart","title":"WHO fast-breathing thresholds by age","alt":"Bar chart of the respiratory rate at or above which breathing counts as fast: 60 breaths a minute under 2 months, 50 from 2 to 11 months, and 40 from 1 to 5 years.","caption":"WHO IMCI thresholds for fast breathing.","spec":{"categories":["Under 2 months","2–11 months","1–5 years"],"series":[{"label":"Fast breathing","values":[60,50,40]}],"value_axis":{"label":"Respiratory rate","unit":"breaths/min","min":0,"max":70},"value_labels":true}}`,
 	Parse:   parseBar,
 }
 
 type barDrawing struct {
-	cats       []string
-	labels     []string
-	values     [][]float64 // [series][category], NaN = none
-	errs       [][]float64 // nil, or NaN = none
+	cats   []string
+	labels []string
+	values [][]float64 // [series][category], NaN = none
+	// bars are each bar's error bar as its two ends, [series][category],
+	// whichever form the spec gave them in; nil for a series with none,
+	// NaN ends for a bar with none.
+	bars       [][]errorBar
 	horizontal bool
 	stacked    bool
 	valueLabel bool
@@ -97,31 +106,7 @@ func parseBar(raw json.RawMessage) (core.Drawing, error) {
 			}
 		}
 		d.values = append(d.values, vals)
-		if se.Errors != nil {
-			if s.Stacked {
-				p.Add(core.Path(path, "errors"), "error bars cannot be drawn on stacked bars: leave errors out or set stacked false")
-			}
-			if len(se.Errors) != n {
-				p.Add(core.Path(path, "errors"), "has %d values but there are %d categories: give one per category, null where there is none", len(se.Errors), n)
-			}
-			errs := make([]float64, n)
-			for j := range errs {
-				errs[j] = math.NaN()
-				if j < len(se.Errors) && se.Errors[j] != nil {
-					e := *se.Errors[j]
-					if e < 0 {
-						p.Add(core.Path(path, "errors", j), "is %s; an error is a half-width, zero or more (the bar shows value ± error)", fmtValue(e))
-					}
-					errs[j] = e
-					if !math.IsNaN(vals[j]) {
-						all = append(all, vals[j]+e, vals[j]-e)
-					}
-				}
-			}
-			d.errs = append(d.errs, errs)
-		} else {
-			d.errs = append(d.errs, nil)
-		}
+		d.bars = append(d.bars, parseErrorBars(&p, path, se, vals, s.Stacked, &all))
 	}
 	if s.Stacked && !p.Any() {
 		all = nil
@@ -165,6 +150,23 @@ func parseBar(raw json.RawMessage) (core.Drawing, error) {
 			}
 			if !d.val.in(v) {
 				d.val.checkIn(&p, core.Path("series", i, "values", j), "value_axis", v)
+			}
+		}
+	}
+	// An error bar's ends must lie on the axis too: one past it would be
+	// drawn out of the plot, over the axis labels.
+	for i, bars := range d.bars {
+		field := "errors"
+		if s.Series[i].Intervals != nil {
+			field = "intervals"
+		}
+		for j, bar := range bars {
+			if bar.given() && (!d.val.in(bar.low) || !d.val.in(bar.high)) {
+				end := bar.high
+				if !d.val.in(bar.low) {
+					end = bar.low
+				}
+				d.val.checkIn(&p, core.Path("series", i, field, j), "value_axis", end)
 			}
 		}
 	}
@@ -296,9 +298,8 @@ func (d *barDrawing) Draw(c *core.Canvas) error {
 			c.Rect(r.x0, r.y0, r.w(), r.h(), 0, col, stroke, 0.8)
 			p.obs.rect(r)
 			// Error bar.
-			if d.errs[i] != nil && !math.IsNaN(d.errs[i][j]) && d.errs[i][j] > 0 {
-				e := d.errs[i][j]
-				e0, e1 := d.val.px(v-e), d.val.px(v+e)
+			if bar := d.barAt(i, j); bar.drawn() {
+				e0, e1 := d.val.px(bar.low), d.val.px(bar.high)
 				cap := math.Min(5, bw*0.3)
 				if d.horizontal {
 					cy := (r.y0 + r.y1) / 2
@@ -355,18 +356,17 @@ func (d *barDrawing) drawValueLabel(c *core.Canvas, p *plot, r rect, v float64, 
 	}
 	col := c.T.Ink
 	// Past the error bar, when there is one.
-	if d.errs[i] != nil && !math.IsNaN(d.errs[i][j]) {
-		e := d.errs[i][j]
+	if bar := d.barAt(i, j); bar.given() {
 		if v >= 0 {
 			if d.horizontal {
-				r.x1 = math.Max(r.x1, d.val.px(v+e))
+				r.x1 = math.Max(r.x1, d.val.px(bar.high))
 			} else {
-				r.y0 = math.Min(r.y0, d.val.px(v+e))
+				r.y0 = math.Min(r.y0, d.val.px(bar.high))
 			}
 		} else if d.horizontal {
-			r.x0 = math.Min(r.x0, d.val.px(v-e))
+			r.x0 = math.Min(r.x0, d.val.px(bar.low))
 		} else {
-			r.y1 = math.Max(r.y1, d.val.px(v-e))
+			r.y1 = math.Max(r.y1, d.val.px(bar.low))
 		}
 	}
 	if d.horizontal {

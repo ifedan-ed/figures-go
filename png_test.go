@@ -143,3 +143,27 @@ func TestKeptIllustrationStillShows(t *testing.T) {
 		t.Fatal("the kept illustration was not drawn light and dark")
 	}
 }
+
+// A bar chart with uneven intervals, in both orientations, becomes a PNG of
+// the figure's height, light and dark.
+func TestRasteriserDrawsUnevenIntervals(t *testing.T) {
+	r := testRasteriser(t)
+	for _, orientation := range []string{"vertical", "horizontal"} {
+		args := `{"type":"bar_chart","title":"Risk of relapse by regimen","alt":"Bar chart of relative risk with uneven 95% confidence intervals.","spec":{"categories":["Regimen A","Regimen B","Regimen C"],"orientation":"` + orientation + `","series":[{"values":[1.53,0.82,1.1],"intervals":[[0.97,2.42],[0.61,1.1],null]}],"value_axis":{"label":"Relative risk","min":0,"max":3},"reference_lines":[{"value":1,"label":"No difference"}]}}`
+		s, err := r.Draw(context.Background(), []byte(args))
+		if err != nil {
+			t.Fatalf("%s: %v", orientation, err)
+		}
+		raw, err := base64.StdEncoding.DecodeString(s.PNG)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := png.DecodeConfig(bytes.NewReader(raw))
+		if err != nil || cfg.Width != PNGWidth {
+			t.Fatalf("%s: %+v, %v", orientation, cfg, err)
+		}
+		if dir := os.Getenv("FIGURES_TEST_KEEP"); dir != "" {
+			_ = os.WriteFile(dir+"/intervals-"+orientation+".png", raw, 0o644)
+		}
+	}
+}

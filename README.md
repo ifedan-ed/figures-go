@@ -12,6 +12,9 @@ the PNGs the apps show.
   growth (WHO/CDC LMS), blood pressure (AAP 2017), zone and dose-response
   charts; function plots; flowcharts, pathways, timelines, cycles,
   comparison tables, concept maps, Venn diagrams and schematics.
+- Bar charts take error bars as symmetric half-widths (`errors`) or as each
+  bar's own low and high (`intervals`), so an uneven interval such as a
+  ratio's 95% CI is drawn where it lies.
 - Free-form, written by the model and checked as strictly: `svg`, `html`,
   `mermaid`. Anatomy is drawn this way (or as a diagram): the built-in
   illustration library (heart, nephron, airway, brain lobes, gut, skin, cell,
