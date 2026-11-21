@@ -29,13 +29,24 @@ characters, and was refused for a box of 121 where 120 fit. A text over its
 limit is refused with its length and the words to keep to, and its start
 quoted; it is never cut.
 
-A word that does not fit its box is kept whole first: the box's text is
-set smaller, down to the floor, and a flowchart node or a table column is
-given the width its longest word needs where the rest of its row can spare
-it. Only then is a word broken, the way a typesetter breaks it: at a hyphen,
-dash or slash it already has ("Life-" / "threatening"), else inside it with
-a hyphen, never leaving fewer than three letters on a side or adding a
-hyphen next to its own. A word none of that can place is refused, named.
+A word that does not fit its box is kept whole first. A flowchart or
+pathway row shares its width by what each box's text needs, taking room
+from boxes that can spare it; then, step by step, boxes of a kind may
+differ in width, the gaps and padding close up, and the text is set
+smaller, down to the floor. A table column is given the width its longest
+word needs from the columns that can spare it, at a smaller size or split
+at its own hyphens if it must. A note beside a crowded row gives up width
+before a box's word is cut. Only then is a word
+broken, the way a typesetter breaks it: at a hyphen, dash or slash it
+already has ("Life-" / "threatening"), else inside it with a hyphen, never
+leaving fewer than three letters on a side or adding a hyphen next to its
+own. A word none of that can place is refused, named.
+
+A flowchart decision branches by edges labelled with their answers (Yes
+and No, Low / Intermediate / High, "> 38 °C"); `yes` and `no` on a
+decision node are still read as a shorthand for two such edges. Three or
+more branches fan out from the decision's bottom, each line on its own
+track into its own box with its label just above that box.
 
 Outside the apps' light and dark pages (a slide deck, a Word file),
 `Rasteriser.Picture` draws one PNG in a `Look`: a host's `Palette`

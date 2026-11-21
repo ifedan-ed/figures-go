@@ -78,8 +78,10 @@ func TextWidth(s string, size float64, bold bool) float64 {
 //  3. otherwise by force, the line ending in ForcedBreak, which no figure
 //     is drawn with: the drawing is refused naming the word (Forced).
 //
-// Callers keep words whole before it comes to this: a smaller size down to
-// the floor (FitWords), a wider box where the layout allows one. An
+// Callers keep words whole before it comes to this: a wider box where the
+// layout can take room from its neighbours, closer padding, a smaller size
+// down to the floor (FitWords), and only then a break at a word's own
+// hyphen (WidestPiece) before one inside it. An
 // explicit newline in s starts a new line.
 func Wrap(s string, size, max float64, bold bool) []string {
 	var out []string
@@ -199,6 +201,27 @@ func WidestWord(s string, size float64, bold bool) float64 {
 	w := 0.0
 	for _, word := range strings.Fields(s) {
 		w = math.Max(w, TextWidth(word, size, bold))
+	}
+	return w
+}
+
+// WidestPiece is WidestWord with each word first split where Wrap may
+// break it without adding anything: after a hyphen, dash or slash of its
+// own, leaving MinBreakLetters on each side ("organ-" / "threatening").
+// A box this wide keeps every word whole or broken only where it already
+// breaks, never cut inside.
+func WidestPiece(s string, size float64, bold bool) float64 {
+	w := 0.0
+	for _, word := range strings.Fields(s) {
+		start := 0
+		for i, r := range word {
+			end := i + utf8.RuneLen(r)
+			if isBreakChar(r) && end < len(word) && letters(word[start:end]) >= MinBreakLetters && letters(word[end:]) >= MinBreakLetters {
+				w = math.Max(w, TextWidth(word[start:end], size, bold))
+				start = end
+			}
+		}
+		w = math.Max(w, TextWidth(word[start:], size, bold))
 	}
 	return w
 }

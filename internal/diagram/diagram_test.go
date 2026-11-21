@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -141,7 +143,7 @@ func TestRefusals(t *testing.T) {
 		{"flowchart", `{"nodes":[{"id":"a","text":"A","next":"x"},{"id":"b","text":"B"}]}`,
 			[]string{`nodes[0].next: "x" is not a node id; ids are a, b`}},
 		{"flowchart", `{"nodes":[{"id":"a","text":"A","next":"d"},{"id":"d","text":"Q?","shape":"decision","yes":"a"}]}`,
-			[]string{"nodes[1]", "needs at least two", "yes and no"}},
+			[]string{"nodes[1]", "needs at least two", "one per answer"}},
 		{"flowchart", `{"nodes":[{"id":"a","text":"A","next":"b"},{"id":"b","text":"B","shape":"end"},{"id":"c","text":"C","shape":"end"}]}`,
 			[]string{"nodes[2]", "cannot be reached", "link to it"}},
 		{"flowchart", `{"nodes":[{"id":"a","text":"A","yes":"b"},{"id":"b","text":"B"}]}`,
@@ -316,7 +318,23 @@ func checkLayout(t *testing.T, l *layout) {
 				}
 			}
 		}
+		if e.label != "" && e.lab == nil {
+			t.Errorf("edge %d's label %q is not drawn", ei, e.label)
+		}
 		if e.lab != nil {
+			if lb := e.lab.at; lb.X < 0 || lb.R() > core.Width || lb.Y < 0 || lb.B() > l.H {
+				t.Errorf("edge %d's label %q at %+v is off the canvas (height %v)", ei, e.label, lb, l.H)
+			}
+			// Read with its own line: touching it, or a few units off.
+			near := false
+			for k := 0; k+1 < len(r); k++ {
+				if segHitsBox(r[k], r[k+1], e.lab.at.grow(8)) {
+					near = true
+				}
+			}
+			if !near {
+				t.Errorf("edge %d's label %q at %+v is not beside its own line %v", ei, e.label, e.lab.at, r)
+			}
 			for bi, b := range boxes {
 				if e.lab.at.overlaps(b, 0) {
 					t.Errorf("edge %d's label %q is over node %d", ei, e.label, bi)
@@ -596,11 +614,51 @@ func TestFlowchartBranchesBesideABox(t *testing.T) {
 	// Every word of every box is whole: the mild-moderate box is given the
 	// width its words need, or its text set smaller.
 	for i, text := range f.text {
-		for _, line := range wrapBlock(text, f.fs[i], l.nodes[i].w-2*fcPadX+2, false).lines {
+		for _, line := range wrapBlock(text, f.fs[i], l.nodes[i].w-2*f.pad[i]+2, false).lines {
 			if strings.HasSuffix(line, "-") && !strings.Contains(text, line) {
 				t.Errorf("node %q breaks a word: %q", f.nodes[i].ID, line)
 			}
 		}
+	}
+}
+
+// Three narrow branches of one decision (a figure drawn with words cut
+// mid-word, 2026-11-21): the row takes room from the boxes that can spare
+// it, closer gaps and padding, and smaller text before any word is cut,
+// so every word of every box is drawn whole, a hyphenated one included.
+func TestThreeBranchesKeepTheirWordsWhole(t *testing.T) {
+	spec := `{"nodes":[
+{"id":"s","text":"Child with suspected neuroblastoma","shape":"start","next":"st"},
+{"id":"st","text":"Imaging, MIBG scan, biopsy with MYCN status, bone marrow","next":"rg"},
+{"id":"rg","text":"Which risk group?","shape":"decision"},
+{"id":"low","text":"Observation, or surgery alone; chemotherapy only for organ-threatening symptoms","tone":"good","shape":"end"},
+{"id":"int","text":"Surgery plus moderate-dose chemotherapy","tone":"warn","shape":"end"},
+{"id":"high","text":"Induction chemotherapy, surgery, myeloablative therapy with stem cell rescue, radiotherapy, immunotherapy","tone":"bad","shape":"end"}],
+"edges":[{"from":"rg","to":"low","label":"Low"},{"from":"rg","to":"int","label":"Intermediate"},{"from":"rg","to":"high","label":"High"}]}`
+	d, err := parseFlowchart(json.RawMessage(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := d.(*flowchart)
+	right := 0.0
+	for i, text := range f.text {
+		n := f.lay.nodes[i]
+		right = max(right, n.absX()+n.w/2)
+		words := map[string]bool{}
+		for _, w := range strings.Fields(text) {
+			words[w] = true
+		}
+		_, _, _, bold, _ := f.style(i)
+		for _, line := range wrapBlock(text, f.fs[i], n.w-2*f.pad[i]+2, bold).lines {
+			for _, w := range strings.Fields(line) {
+				if !words[w] {
+					t.Errorf("node %q cuts a word: line %q", f.nodes[i].ID, line)
+				}
+			}
+		}
+	}
+	if right > core.Width-margin+0.5 {
+		t.Errorf("the row runs to %v, past the figure's width", right)
 	}
 }
 
@@ -618,4 +676,114 @@ func TestATableColumnWidensForAWholeWord(t *testing.T) {
 	if tb.colW[3] <= tb.colW[2] {
 		t.Errorf("the columns are %v", tb.colW)
 	}
+}
+
+// The feature column gives way like the others: a long feature word
+// ("Immunotherapy", bold) takes width from the columns with short cells
+// rather than being cut.
+func TestATableFeatureColumnWidensForAWholeWord(t *testing.T) {
+	d, err := parseTable(json.RawMessage(`{"columns":["Low","Intermediate","High"],"rows":[{"feature":"Immunotherapy","cells":["no","no","yes"]},{"feature":"Chemotherapy","cells":["Rarely","Moderate","Intensive"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb := d.(*table)
+	for _, f := range tb.features {
+		for _, line := range f.lines {
+			if strings.HasSuffix(line, "-") {
+				t.Errorf("a feature is cut: %q", line)
+			}
+		}
+	}
+	total := 0.0
+	for _, w := range tb.colW {
+		total += w
+	}
+	if total > avail+0.5 {
+		t.Errorf("the columns take %v, more than %v", total, avail)
+	}
+}
+
+// Decisions with labelled branches as a model drew them (2026-11-21),
+// three and four of them out of one decision among them: every label is
+// drawn, on the canvas, beside its own line and clear of every box, note
+// and other label; and the branches out of one decision cross no other.
+func TestBranchLabelsAreReadable(t *testing.T) {
+	files, err := filepath.Glob("../../testdata/branches/*.json")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no specs: %v", err)
+	}
+	for _, file := range files {
+		t.Run(filepath.Base(file), func(t *testing.T) {
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var args struct {
+				Spec json.RawMessage `json:"spec"`
+			}
+			if err := json.Unmarshal(raw, &args); err != nil {
+				t.Fatal(err)
+			}
+			d, err := parseFlowchart(args.Spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l := d.(*flowchart).lay
+			checkLayout(t, l)
+			byFrom := map[int][]*gedge{}
+			for _, e := range l.g.edges {
+				if !e.back && !e.attach {
+					byFrom[e.from] = append(byFrom[e.from], e)
+				}
+			}
+			for _, es := range byFrom {
+				for i := range es {
+					for j := i + 1; j < len(es); j++ {
+						if routesCross(es[i].route, es[j].route) {
+							t.Errorf("branches %q and %q out of one node cross", es[i].label, es[j].label)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// routesCross says whether two orthogonal routes cross: a horizontal leg
+// of one passes through a vertical leg of the other strictly inside both
+// (meeting at a shared start is not a crossing).
+func routesCross(a, b []core.Pt) bool {
+	legs := func(r []core.Pt) (h, v [][2]core.Pt) {
+		for k := 0; k+1 < len(r); k++ {
+			switch {
+			case math.Abs(r[k].Y-r[k+1].Y) < 0.01 && math.Abs(r[k].X-r[k+1].X) > 0.01:
+				h = append(h, [2]core.Pt{r[k], r[k+1]})
+			case math.Abs(r[k].X-r[k+1].X) < 0.01 && math.Abs(r[k].Y-r[k+1].Y) > 0.01:
+				v = append(v, [2]core.Pt{r[k], r[k+1]})
+			}
+		}
+		return
+	}
+	cross := func(h, v [2]core.Pt) bool {
+		x0, x1 := math.Min(h[0].X, h[1].X), math.Max(h[0].X, h[1].X)
+		y0, y1 := math.Min(v[0].Y, v[1].Y), math.Max(v[0].Y, v[1].Y)
+		return v[0].X > x0+0.5 && v[0].X < x1-0.5 && h[0].Y > y0+0.5 && h[0].Y < y1-0.5
+	}
+	ah, av := legs(a)
+	bh, bv := legs(b)
+	for _, h := range ah {
+		for _, v := range bv {
+			if cross(h, v) {
+				return true
+			}
+		}
+	}
+	for _, h := range bh {
+		for _, v := range av {
+			if cross(h, v) {
+				return true
+			}
+		}
+	}
+	return false
 }

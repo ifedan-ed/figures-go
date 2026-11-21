@@ -110,6 +110,53 @@ func fitSize(s string, size, max float64, bold bool) float64 {
 	return core.Small
 }
 
+// fitStep is one way to set a box's text: its size, the padding at each
+// side, and whether a word may break at a hyphen, dash or slash of its own
+// (pieces). A box's ladder of steps runs from its own size and padding to
+// the floor; a layout walks it only as far as its row's room needs.
+type fitStep struct {
+	size, pad float64
+	pieces    bool
+}
+
+// fitLadder is the steps for a box's text, least changed first: at each
+// size from size down to core.Small, the full padding and then the tight;
+// then, at tight padding from size down again, words split at their own
+// hyphens. Closer padding comes before smaller text because it is the
+// less visible change; a hyphen break comes last of all, as a reader
+// notices a split word more than either.
+func fitLadder(size, pad, tight float64) []fitStep {
+	var out []fitStep
+	for s := size; s >= core.Small-0.01; s -= 0.5 {
+		out = append(out, fitStep{s, pad, false}, fitStep{s, tight, false})
+	}
+	for s := size; s >= core.Small-0.01; s -= 0.5 {
+		out = append(out, fitStep{s, tight, true})
+	}
+	return out
+}
+
+// need is the narrowest box that holds every word of s whole at st (or
+// every piece, when st allows pieces), with st's padding.
+func (st fitStep) need(s string, bold bool) float64 {
+	w := core.WidestWord(s, st.size, bold)
+	if st.pieces {
+		w = core.WidestPiece(s, st.size, bold)
+	}
+	return w + 2*st.pad + 2
+}
+
+// pickFit is the first step of ladder at which s fits a box maxW wide, or
+// the last when none does (and Wrap breaks a word by its own rules).
+func pickFit(ladder []fitStep, s string, bold bool, maxW float64) fitStep {
+	for _, st := range ladder {
+		if st.need(s, bold) <= maxW {
+			return st
+		}
+	}
+	return ladder[len(ladder)-1]
+}
+
 // wrapPara is wrapBlock for running text, filled line by line.
 func wrapPara(s string, size, max float64, bold bool) textBlock {
 	lines := core.Wrap(s, size, max, bold)

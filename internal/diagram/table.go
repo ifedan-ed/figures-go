@@ -137,13 +137,11 @@ func parseTable(raw json.RawMessage) (core.Drawing, error) {
 func (t *table) layout(s tbSpec) {
 	n := len(s.Columns)
 	first := map[int]float64{2: 112, 3: 98, 4: 84}[n]
-	widths := t.columnWidths(s, avail-first)
-	t.colX, t.colW = []float64{margin}, []float64{first}
-	x := margin + first
-	for i := 0; i < n; i++ {
+	t.colW = t.columnWidths(s, first)
+	x := margin
+	for i := 0; i <= n; i++ {
 		t.colX = append(t.colX, x)
-		t.colW = append(t.colW, widths[i])
-		x += widths[i]
+		x += t.colW[i]
 	}
 	inner := func(c int) float64 { return t.colW[c] - 2*tbPadX }
 	t.corner = wrapBlock(s.Corner, labelSize, inner(0), true)
@@ -278,48 +276,86 @@ func drawMark(c *core.Canvas, x, y float64, mark string) {
 	}
 }
 
-// columnWidths shares room among the columns: equally, unless a column's
-// longest word (its heading's, or a cell's) would not stay whole in an
-// equal share. That column is given the width it needs, and the others
-// share what is left, as long as each of them still keeps its own words
-// whole; otherwise the shares stay equal and the text is made smaller, or
-// broken by the usual rules (core.Wrap).
-func (t *table) columnWidths(s tbSpec, room float64) []float64 {
+// columnWidths shares the width among the columns, the feature column
+// first. Each column would have its usual share (first for the features,
+// the rest equal); a column whose longest word (its heading's, or a
+// cell's) needs more is given it, and the others give up the same amount
+// between them, evenly, as far as their own words allow. When the words
+// do not fit at the text's own size, the same is tried at each smaller
+// size down to the floor, and then with words split at their own hyphens;
+// only when none of that fits are the shares left as they were and a word
+// broken inside (core.Wrap).
+func (t *table) columnWidths(s tbSpec, first float64) []float64 {
 	n := len(s.Columns)
-	equal := make([]float64, n)
-	for i := range equal {
-		equal[i] = room / float64(n)
+	pref := make([]float64, n+1)
+	pref[0] = first
+	for j := 1; j <= n; j++ {
+		pref[j] = (avail - first) / float64(n)
 	}
-	need := make([]float64, n)
-	for j, c := range s.Columns {
-		need[j] = core.WidestWord(c, tbHeadSz, true)
-		for i := range t.cells {
-			need[j] = max(need[j], core.WidestWord(t.cells[i][j].Text, tbSize, false))
+	widest := func(text string, size float64, bold, pieces bool) float64 {
+		size = max(size, core.Small)
+		if pieces {
+			return core.WidestPiece(text, size, bold)
 		}
-		need[j] += 2*tbPadX + 2
+		return core.WidestWord(text, size, bold)
 	}
-	grown, left, rest := map[int]bool{}, room, n
-	for j := range need {
-		if need[j] > equal[j] {
-			grown[j] = true
-			left -= need[j]
-			rest--
+	for _, pieces := range []bool{false, true} {
+		for drop := 0.0; tbHeadSz-drop >= core.Small-0.01; drop += 0.5 {
+			need := make([]float64, n+1)
+			// The corner is set at its own size, never smaller.
+			need[0] = widest(s.Corner, labelSize, true, pieces)
+			for i, r := range s.Rows {
+				need[0] = max(need[0], widest(r.Feature, tbSize-drop, true, pieces))
+				for j, c := range t.cells[i] {
+					need[j+1] = max(need[j+1], widest(c.Text, tbSize-drop, false, pieces))
+				}
+			}
+			for j, c := range s.Columns {
+				need[j+1] = max(need[j+1], widest(c, tbHeadSz-drop, true, pieces))
+			}
+			for j := range need {
+				need[j] += 2*tbPadX + 2
+			}
+			if w, ok := giveAndTake(pref, need, avail); ok {
+				return w
+			}
 		}
 	}
-	if len(grown) == 0 || rest == 0 {
-		return equal
-	}
-	share := left / float64(rest)
-	out := make([]float64, n)
-	for j := range out {
-		if grown[j] {
-			out[j] = need[j]
-			continue
+	return pref
+}
+
+// giveAndTake is widths summing to total, each at least its need and
+// otherwise its preferred width less one common amount (more, when there
+// is room to spare): the columns with slack pay evenly for the ones that
+// need more. It reports false when the needs alone exceed total.
+func giveAndTake(pref, need []float64, total float64) ([]float64, bool) {
+	sum := func(lambda float64) float64 {
+		t := 0.0
+		for j := range pref {
+			t += max(need[j], pref[j]-lambda)
 		}
-		if need[j] > share {
-			return equal
-		}
-		out[j] = share
+		return t
 	}
-	return out
+	t := 0.0
+	for _, n := range need {
+		t += n
+	}
+	if t > total+0.01 {
+		return nil, false
+	}
+	// sum falls as lambda rises; lambda below zero hands out spare room.
+	lo, hi := -total, total
+	for range 50 {
+		mid := (lo + hi) / 2
+		if sum(mid) > total {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	out := make([]float64, len(pref))
+	for j := range pref {
+		out[j] = max(need[j], pref[j]-hi)
+	}
+	return out, true
 }

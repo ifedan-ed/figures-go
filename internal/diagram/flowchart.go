@@ -10,16 +10,17 @@ import (
 var flowchartKind = core.Kind{
 	Name:   "flowchart",
 	Family: "diagram",
-	Use:    "A management algorithm or process with steps and yes/no decisions, drawn top down like a clinical guideline; for a cascade of activations and inhibitions use pathway, for events in time use timeline, for a sequence or state diagram use mermaid.",
-	Fields: "nodes: [{id, text (" + core.UpTo(maxNodeText) + "), shape: start|step|decision|end|note (default step), tone?, next?, yes?, no?}] (2 to 30), in reading order, the first where the flow starts. next is the id that follows a start or step; a decision has yes and no instead (or edges with labels); an end has nothing after it. A note is a remark drawn beside the node its next names. Optional edges: [{from, to, label? (" + core.UpTo(maxEdgeLabel) + ")}] for links next/yes/no cannot say (a third branch, a branch labelled other than Yes/No). A link back to an earlier node (reassess, repeat) is drawn as a loop round the side.",
+	Use:    "A management algorithm or process drawn top down like a clinical guideline: steps, and decisions that branch; for a cascade of activations and inhibitions use pathway, for events in time use timeline, for a sequence or state diagram use mermaid.",
+	Fields: "nodes: [{id, text (" + core.UpTo(maxNodeText) + "), shape: start|step|decision|end|note (default step), tone?, next?}] (2 to 30), in reading order, the first where the flow starts. next is the id that follows a start or step; an end has nothing after it; a note is a remark drawn beside the node its next names. edges: [{from, to, label? (" + core.UpTo(maxEdgeLabel) + ")}] are the other links: each branch of a decision is an edge from it, labelled with the answer it stands for. A link back to an earlier node (reassess, repeat) is drawn as a loop round the side.",
 	Example: `{"type":"flowchart","title":"Anaphylaxis: first steps","alt":"Algorithm: give IM adrenaline, then call for help, lie flat, oxygen and fluids; reassess after 5 minutes and repeat adrenaline until improving, then observe.","caption":"Doses after the Resuscitation Council UK 2021 guideline.","spec":{"nodes":[` +
 		`{"id":"s","text":"Suspected anaphylaxis: airway, breathing or circulation problem","shape":"start","next":"adr"},` +
 		`{"id":"adr","text":"IM adrenaline 10 micrograms/kg (1 mg/mL), anterolateral thigh","tone":"bad","next":"sup"},` +
 		`{"id":"dose","text":"Maximum 500 micrograms per dose","shape":"note","next":"adr"},` +
 		`{"id":"sup","text":"Call for help, lie flat, high-flow oxygen, IV fluid 10 mL/kg","next":"re"},` +
-		`{"id":"re","text":"Improving after 5 minutes?","shape":"decision","yes":"obs","no":"rep"},` +
+		`{"id":"re","text":"Improving after 5 minutes?","shape":"decision"},` +
 		`{"id":"rep","text":"Repeat IM adrenaline every 5 minutes","next":"re"},` +
-		`{"id":"obs","text":"Observe at least 6 to 12 hours","shape":"end","tone":"good"}]}}`,
+		`{"id":"obs","text":"Observe at least 6 to 12 hours","shape":"end","tone":"good"}],` +
+		`"edges":[{"from":"re","to":"obs","label":"Yes"},{"from":"re","to":"rep","label":"No"}]}}`,
 	Parse: parseFlowchart,
 }
 
@@ -34,8 +35,12 @@ type fcNode struct {
 	Shape string `json:"shape"`
 	Tone  string `json:"tone"`
 	Next  string `json:"next"`
-	Yes   string `json:"yes"`
-	No    string `json:"no"`
+	// Yes and No are a shorthand for a decision's two edges labelled Yes
+	// and No. The description no longer offers them (a decision's branches
+	// are edges labelled with their answers), but specs written with them
+	// are still drawn.
+	Yes string `json:"yes"`
+	No  string `json:"no"`
 }
 
 type fcEdge struct {
@@ -60,8 +65,13 @@ type flowchart struct {
 	text  []string
 	// fs is each node's text size as its box was sized (size), so it is
 	// drawn at the size it was measured at.
-	fs  []float64
-	lay *layout
+	fs []float64
+	// pad is each node's padding as its box was sized: the full padding
+	// of its shape, or the tight one where its row is short of room.
+	pad []float64
+	// ladder is each node's ways to set its text (fitLadder).
+	ladder [][]fitStep
+	lay    *layout
 	// edges carry how each is drawn.
 	edges []*gedge
 }
@@ -89,7 +99,7 @@ func parseFlowchart(raw json.RawMessage) (core.Drawing, error) {
 		}
 	}
 	idsText := idList(ids)
-	f := &flowchart{nodes: s.Nodes, text: make([]string, len(s.Nodes)), fs: make([]float64, len(s.Nodes))}
+	f := &flowchart{nodes: s.Nodes, text: make([]string, len(s.Nodes)), fs: make([]float64, len(s.Nodes)), pad: make([]float64, len(s.Nodes))}
 	type link struct {
 		from, to int
 		label    string
@@ -117,11 +127,11 @@ func parseFlowchart(raw json.RawMessage) (core.Drawing, error) {
 		switch n.Shape {
 		case "decision":
 			if n.Next != "" {
-				p.Add(core.Path(at, "next"), "a decision branches with yes and no (or edges with labels), not next; use yes and no")
+				p.Add(core.Path(at, "next"), "a decision branches by edges labelled with their answers, not next; give it an edge to each branch")
 			}
 		default:
 			if n.Yes != "" || n.No != "" {
-				p.Add(core.Path(at), "only a decision has yes and no; use next, or make it shape \"decision\"")
+				p.Add(core.Path(at), "only a decision has yes and no; use next, or make it shape \"decision\" with an edge to each branch")
 			}
 		}
 		if n.Shape == "end" && n.Next != "" {
@@ -156,12 +166,17 @@ func parseFlowchart(raw json.RawMessage) (core.Drawing, error) {
 			continue
 		}
 		if s.Nodes[a].Shape == "decision" && lb == "" {
-			p.Add(core.Path(at, "label"), "a branch from decision %q needs a label, such as Yes, No or \"> 38 °C\"", e.From)
+			p.Add(core.Path(at, "label"), "a branch from decision %q needs a label: the answer it stands for", e.From)
 		}
 		links = append(links, link{a, b, lb, s.Nodes[a].Shape == "decision", at})
 	}
 	if p.Any() {
 		return nil, p.Err()
+	}
+	f.ladder = make([][]fitStep, len(s.Nodes))
+	for i := range s.Nodes {
+		pad, tight, size, _, _ := f.style(i)
+		f.ladder[i] = fitLadder(size, pad, tight)
 	}
 	// Links checked as a whole.
 	seen := map[[2]int]bool{}
@@ -185,7 +200,7 @@ func parseFlowchart(raw json.RawMessage) (core.Drawing, error) {
 	for i, n := range s.Nodes {
 		at := core.Path("nodes", i)
 		if n.Shape == "decision" && out[i] < 2 {
-			p.Add(at, "decision %q has %d branch; a decision needs at least two (yes and no), or make it a step with next", n.ID, out[i])
+			p.Add(at, "decision %q has %d branch; a decision needs at least two edges, one per answer, or make it a step with next", n.ID, out[i])
 		}
 		if out[i] > 4 {
 			p.Add(at, "%q has %d links out; at most 4 fit below one box, so split the choice into two decisions", n.ID, out[i])
@@ -257,8 +272,19 @@ func parseFlowchart(raw json.RawMessage) (core.Drawing, error) {
 		g := &graph{n: len(s.Nodes), roots: roots, what: "flowchart", maxW: 236, minW: 76, baseGap: 30,
 			name: func(i int) string { return fmt.Sprintf("%q", ids[i]) }}
 		g.size = f.size
-		g.whole = f.whole
+		g.need = f.need
 		g.narrow = func(i int) bool { return s.Nodes[i].Shape == "note" }
+		// Lines leave a decision's flat bottom, not its slanted points,
+		// and a rounded end's straight part.
+		g.inset = func(i int) float64 {
+			switch s.Nodes[i].Shape {
+			case "decision":
+				return fcPoint + 6
+			case "start", "end":
+				return 16
+			}
+			return 8
+		}
 		g.class = func(i int) int {
 			switch s.Nodes[i].Shape {
 			case "decision":
@@ -327,37 +353,43 @@ const (
 	fcPoint = 13.0 // how far a decision's points reach out
 )
 
-// style is node i's padding, text size, weight and narrowest width, by
-// its shape.
-func (f *flowchart) style(i int) (pad, size float64, bold bool, minW float64) {
+// style is node i's padding (full, and tight for a row short of room),
+// text size, weight and narrowest width, by its shape. A decision's
+// padding includes its points, which text must keep clear of.
+func (f *flowchart) style(i int) (pad, tight, size float64, bold bool, minW float64) {
 	switch f.nodes[i].Shape {
 	case "decision":
-		return fcPadX + fcPoint, nodeSize, true, 130
+		return fcPadX + fcPoint, 6 + fcPoint, nodeSize, true, 130
 	case "start", "end":
-		return 16, nodeSize, true, 110
+		return 16, 10, nodeSize, true, 110
 	case "note":
-		return 9, labelSize + 0.5, false, 80
+		return 9, 6, labelSize + 0.5, false, 80
 	}
-	return fcPadX, nodeSize, false, 116
+	return fcPadX, 8, nodeSize, false, 116
 }
 
-// whole is the width node i needs for its longest word to stay whole at
-// its own text size.
-func (f *flowchart) whole(i int) float64 {
-	pad, size, bold, minW := f.style(i)
-	return max(minW, core.WidestWord(f.text[i], size, bold)+2*pad+2)
+// need is the narrowest node i can be at step k of its ladder, and false
+// past its end.
+func (f *flowchart) need(i, k int) (float64, bool) {
+	if k >= len(f.ladder[i]) {
+		return 0, false
+	}
+	_, _, _, bold, _ := f.style(i)
+	return f.ladder[i][k].need(f.text[i], bold), true
 }
 
-// size is node i's width and height for a text at most maxW wide. Its
-// text is made smaller, down to the floor, before a word in it is broken.
+// size is node i's width and height for a box at most maxW wide. Its text
+// is set at the first step of its ladder that keeps every word whole in
+// maxW, and only when none does is a word broken (core.Wrap).
 func (f *flowchart) size(i int, maxW float64) (float64, float64) {
-	pad, size, bold, minW := f.style(i)
+	_, _, _, bold, minW := f.style(i)
 	if f.nodes[i].Shape == "note" {
 		maxW = min(maxW, 136)
 	}
-	f.fs[i] = core.FitWords(f.text[i], size, core.Small, maxW-2*pad, bold)
-	tb := wrapBlock(f.text[i], f.fs[i], maxW-2*pad, bold)
-	w := min(maxW, max(minW, tb.w+2*pad+2))
+	st := pickFit(f.ladder[i], f.text[i], bold, maxW)
+	f.fs[i], f.pad[i] = st.size, st.pad
+	tb := wrapBlock(f.text[i], st.size, maxW-2*st.pad, bold)
+	w := min(maxW, max(minW, tb.w+2*st.pad+2))
 	h := max(34, tb.h+2*fcPadY)
 	if f.nodes[i].Shape == "note" {
 		h = max(28, tb.h+12)
@@ -378,7 +410,7 @@ func (f *flowchart) Draw(c *core.Canvas) error {
 	for i, n := range f.nodes {
 		g := f.lay.nodes[i]
 		b := box{g.absX() - g.w/2, g.y, g.w, g.h}
-		f.drawNode(c, n, f.text[i], f.fs[i], b)
+		f.drawNode(c, n, f.text[i], f.fs[i], f.pad[i], b)
 	}
 	for _, e := range f.edges {
 		if e.lab != nil {
@@ -391,7 +423,9 @@ func (f *flowchart) Draw(c *core.Canvas) error {
 	return nil
 }
 
-func (f *flowchart) drawNode(c *core.Canvas, n fcNode, text string, size float64, b box) {
+// drawNode draws a node's shape and its text, wrapped within pad of each
+// side as it was measured (size).
+func (f *flowchart) drawNode(c *core.Canvas, n fcNode, text string, size, pad float64, b box) {
 	t := c.T
 	switch n.Shape {
 	case "decision":
@@ -399,7 +433,7 @@ func (f *flowchart) drawNode(c *core.Canvas, n fcNode, text string, size float64
 		pts := []core.Pt{{X: b.X, Y: b.CY()}, {X: b.X + fcPoint, Y: b.Y}, {X: b.R() - fcPoint, Y: b.Y}, {X: b.R(), Y: b.CY()},
 			{X: b.R() - fcPoint, Y: b.B()}, {X: b.X + fcPoint, Y: b.B()}}
 		c.Polygon(pts, fill, stroke, 1.4)
-		tb := wrapBlock(text, size, b.W-2*(fcPadX+fcPoint)+2, true)
+		tb := wrapBlock(text, size, b.W-2*pad+2, true)
 		tb.draw(c, b.CX(), b.CY(), t.Ink, core.Middle, false)
 	case "start", "end":
 		stroke, fill := toneOf(t, n.Tone, t.Ink, t.SurfaceAlt)
@@ -407,17 +441,17 @@ func (f *flowchart) drawNode(c *core.Canvas, n fcNode, text string, size float64
 			stroke = t.Edge
 		}
 		c.Rect(b.X, b.Y, b.W, b.H, min(b.H/2, 17), fill, stroke, 1.4)
-		tb := wrapBlock(text, size, b.W-32+2, true)
+		tb := wrapBlock(text, size, b.W-2*pad+2, true)
 		tb.draw(c, b.CX(), b.CY(), t.Ink, core.Middle, false)
 	case "note":
 		c.El("rect", "x", core.F(b.X), "y", core.F(b.Y), "width", core.F(b.W), "height", core.F(b.H), "rx", "4",
 			"fill", t.Bg, "stroke", t.Edge, "stroke-width", "1", "stroke-dasharray", "3 2")
-		tb := wrapBlock(text, size, b.W-18+2, false)
+		tb := wrapBlock(text, size, b.W-2*pad+2, false)
 		tb.draw(c, b.CX(), b.CY(), t.Muted, core.Middle, true)
 	default:
 		stroke, fill := toneOf(t, n.Tone, t.Edge, t.Surface)
 		c.Rect(b.X, b.Y, b.W, b.H, 6, fill, stroke, 1.2)
-		tb := wrapBlock(text, size, b.W-2*fcPadX+2, false)
+		tb := wrapBlock(text, size, b.W-2*pad+2, false)
 		tb.draw(c, b.CX(), b.CY(), t.Ink, core.Middle, false)
 	}
 }

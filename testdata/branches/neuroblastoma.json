@@ -1,0 +1,8 @@
+{"type":"flowchart","title":"Neuroblastoma: risk group decides treatment","alt":"Diagnosis and staging lead to a risk group; low risk is observed or resected, intermediate risk gets surgery and moderate-dose chemotherapy, high risk gets intensive multimodal therapy.","caption":"After COG and SIOPEN risk stratification.","spec":{"nodes":[
+{"id":"s","text":"Child with suspected neuroblastoma","shape":"start","next":"st"},
+{"id":"st","text":"Imaging, MIBG scan, biopsy with MYCN status, bone marrow","next":"rg"},
+{"id":"rg","text":"Which risk group?","shape":"decision"},
+{"id":"low","text":"Observation, or surgery alone; chemotherapy only for organ-threatening symptoms","tone":"good","shape":"end"},
+{"id":"int","text":"Surgery plus moderate-dose chemotherapy","tone":"warn","shape":"end"},
+{"id":"high","text":"Induction chemotherapy, surgery, myeloablative therapy with stem cell rescue, radiotherapy, immunotherapy","tone":"bad","shape":"end"}],
+"edges":[{"from":"rg","to":"low","label":"Low"},{"from":"rg","to":"int","label":"Intermediate"},{"from":"rg","to":"high","label":"High"}]}}

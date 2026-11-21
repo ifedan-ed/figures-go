@@ -50,11 +50,15 @@ const pwNodeChars = 100
 var effects = []string{"activates", "inhibits", "converts", "releases"}
 
 type pathway struct {
-	nodes  []pwNode
-	text   []string
-	lay    *layout
-	used   map[string]bool
-	legend float64
+	nodes []pwNode
+	text  []string
+	lay   *layout
+	// fs and pad are each node's text size and padding as its box was
+	// sized, and ladder its ways to set them (fitLadder).
+	fs, pad []float64
+	ladder  [][]fitStep
+	used    map[string]bool
+	legend  float64
 }
 
 func parsePathway(raw json.RawMessage) (core.Drawing, error) {
@@ -151,7 +155,13 @@ func parsePathway(raw json.RawMessage) (core.Drawing, error) {
 	if p.Any() {
 		return nil, p.Err()
 	}
+	w.fs, w.pad, w.ladder = make([]float64, len(s.Nodes)), make([]float64, len(s.Nodes)), make([][]fitStep, len(s.Nodes))
+	for i := range s.Nodes {
+		pad, tight, size, _ := w.style(i)
+		w.ladder[i] = fitLadder(size, pad, tight)
+	}
 	g.size = w.size
+	g.need = w.need
 	g.class = func(i int) int {
 		if s.Nodes[i].Input {
 			return 1
@@ -175,13 +185,39 @@ func parsePathway(raw json.RawMessage) (core.Drawing, error) {
 	return w, nil
 }
 
-func (w *pathway) size(i int, maxW float64) (float64, float64) {
+// style is node i's padding (full and tight), text size and weight: an
+// input is a bold pill, a step a plain box.
+func (w *pathway) style(i int) (pad, tight, size float64, bold bool) {
 	if w.nodes[i].Input {
-		tb := wrapBlock(w.text[i], labelSize+0.5, min(maxW, 150)-20, true)
-		return max(64, tb.w+22), max(26, tb.h+10)
+		return 10, 8, labelSize + 0.5, true
 	}
-	tb := wrapBlock(w.text[i], nodeSize, maxW-22, false)
-	return min(maxW, max(96, tb.w+24)), max(32, tb.h+16)
+	return 11, 7, nodeSize, false
+}
+
+// need is the narrowest node i can be at step k of its ladder, and false
+// past its end.
+func (w *pathway) need(i, k int) (float64, bool) {
+	if k >= len(w.ladder[i]) {
+		return 0, false
+	}
+	_, _, _, bold := w.style(i)
+	return w.ladder[i][k].need(w.text[i], bold), true
+}
+
+// size is node i's width and height for a box at most maxW wide, its text
+// set at the first step of its ladder that keeps every word whole.
+func (w *pathway) size(i int, maxW float64) (float64, float64) {
+	_, _, _, bold := w.style(i)
+	if w.nodes[i].Input {
+		maxW = min(maxW, 150)
+	}
+	st := pickFit(w.ladder[i], w.text[i], bold, maxW)
+	w.fs[i], w.pad[i] = st.size, st.pad
+	tb := wrapBlock(w.text[i], st.size, maxW-2*st.pad, bold)
+	if w.nodes[i].Input {
+		return max(64, tb.w+2*st.pad+2), max(26, tb.h+10)
+	}
+	return min(maxW, max(96, tb.w+2*st.pad+2)), max(32, tb.h+16)
 }
 
 // effectStyle is how a link of an effect is drawn.
@@ -209,13 +245,13 @@ func (w *pathway) Draw(c *core.Canvas) error {
 		if n.Input {
 			stroke, fill := toneOf(t, n.Tone, t.Muted, t.SurfaceAlt)
 			c.Rect(b.X, b.Y, b.W, b.H, b.H/2, fill, stroke, 1.2)
-			tb := wrapBlock(w.text[i], labelSize+0.5, b.W-20+2, true)
+			tb := wrapBlock(w.text[i], w.fs[i], b.W-2*w.pad[i]+2, true)
 			tb.draw(c, b.CX(), b.CY(), t.Ink, core.Middle, false)
 			continue
 		}
 		stroke, fill := toneOf(t, n.Tone, t.Edge, t.Surface)
 		c.Rect(b.X, b.Y, b.W, b.H, 8, fill, stroke, 1.3)
-		tb := wrapBlock(w.text[i], nodeSize, b.W-22+2, false)
+		tb := wrapBlock(w.text[i], w.fs[i], b.W-2*w.pad[i]+2, false)
 		tb.draw(c, b.CX(), b.CY(), t.Ink, core.Middle, false)
 	}
 	for _, e := range w.lay.g.edges {

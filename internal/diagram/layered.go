@@ -58,7 +58,7 @@ type gnode struct {
 
 func (n *gnode) dummy() bool { return n.idx < 0 }
 
-func (n *gnode) bbox() box { return box{n.x - n.w/2, n.y, n.w, n.h} }
+func (n *gnode) bbox() box { return box{n.absX() - n.w/2, n.y, n.w, n.h} }
 
 // leftExt and rightExt are how far a host and its attachments reach from
 // the host's centre.
@@ -120,6 +120,10 @@ type gedge struct {
 	// depart is where a node's only line leaves its bottom when it heads
 	// off to a side (0: the bottom's middle).
 	depart float64
+	// fan says the line is one of three or more out of one node: each
+	// leaves the node's bottom at a port of its own (depart), runs on a
+	// track of its own and carries its label just above its target.
+	fan bool
 }
 
 // attachment puts node beside host; side is the side wanted (0: either).
@@ -138,11 +142,12 @@ type graph struct {
 	// wide; class groups nodes that share a size within a row.
 	size  func(i int, maxW float64) (w, h float64)
 	class func(i int) int
-	// whole is the width node i needs for every word of its text to stay
-	// whole at its own text size (optional): a row gives a node with a
-	// long word more of its width before the node's text is made smaller
-	// or a word in it broken.
-	whole func(i int) float64
+	// need is the narrowest node i can be at step k of its ladder (see
+	// fitLadder), and false past the ladder's end (optional). A row walks
+	// the ladder only as far as its room makes it, giving a node with a
+	// long word room its neighbours can spare, so a word is broken only
+	// when no setting keeps it whole.
+	need func(i, k int) (float64, bool)
 	// roots are where the flow starts, for finding loops.
 	roots []int
 	late  bool
@@ -157,6 +162,10 @@ type graph struct {
 	maxW, minW float64
 	labelMid   bool
 	baseGap    float64
+	// inset is how far in from each end of node i's bottom a line may
+	// leave it (optional; 8 when unset): a decision's slanted points or a
+	// rounded end take the corners.
+	inset func(i int) float64
 }
 
 // layout is a laid-out graph.
@@ -167,16 +176,24 @@ type layout struct {
 	all    []*gnode // every node and placeholder
 	H      float64
 	chans  map[int]*channel
+	// gap is the space between two boxes in each row: gapNodes, or
+	// gapTight where the row needs the room to keep its words whole.
+	gap []float64
 }
 
 const (
 	gapNodes   = 22.0 // between boxes in a row
+	gapTight   = 14.0 // between boxes in a row short of room
 	gapDummy   = 12.0 // between a box and a passing line
 	gapDummies = 9.0  // between two passing lines
 	dummyW     = 2.0
 	trackSep   = 9.0
 	laneSep    = 10.0
 	attachGap  = 30.0
+	fanSep     = 18.0 // between the ports of a fan's lines
+	// fanLabelLift is how far a fan's label sits above its target, clear
+	// of the arrowhead (arrowLen of a 1.4 line, and a little).
+	fanLabelLift = 12.0
 )
 
 // rpt is a route point whose y is known only once rows are placed: a
@@ -580,9 +597,11 @@ func (l *layout) crossings(cs map[*gnode][]conn) int {
 // sizeRows sizes every node for the room its row leaves.
 func (l *layout) sizeRows(p *core.Problems) bool {
 	g := l.g
+	l.gap = make([]float64, len(l.layers))
 	for k, row := range l.layers {
+		l.gap[k] = gapNodes
 		var real []*gnode
-		seps := 0.0
+		seps, boxGaps := 0.0, 0
 		for i, n := range row {
 			if !n.dummy() {
 				real = append(real, n)
@@ -598,20 +617,25 @@ func (l *layout) sizeRows(p *core.Problems) bool {
 				seps += dummyW
 			}
 			if i > 0 {
-				seps += sepGap(row[i-1], n)
+				if row[i-1].dummy() || n.dummy() {
+					seps += l.sepGap(row[i-1], n)
+				} else {
+					boxGaps++
+				}
 			}
 		}
 		if len(real) == 0 {
 			continue
 		}
 		lr, rr := l.laneRes(k)
-		room := avail - lr - rr - seps
+		room := avail - lr - rr - seps - float64(boxGaps)*gapNodes
 		// Narrow nodes (notes) take their own size first.
-		var wide []*gnode
+		var wide, narrow []*gnode
 		for _, n := range real {
 			if g.narrow != nil && g.narrow(n.idx) {
 				n.w, n.h = g.size(n.idx, min(g.maxW, room/float64(len(real))))
 				room -= n.w
+				narrow = append(narrow, n)
 			} else {
 				wide = append(wide, n)
 			}
@@ -629,15 +653,48 @@ func (l *layout) sizeRows(p *core.Problems) bool {
 				k+1, g.what, len(real), strings.Join(names, ", "))
 			return false
 		}
-		// Size each, then give nodes of one class the same size. A node
-		// whose words would not stay whole in an equal share is given
-		// the width it needs, when the rest of the row still fits.
-		if !l.sizeWide(wide, limit, room) {
+		// Widths by content (fitWidths); when even the last step of every
+		// ladder cannot keep the words whole, an equal share, and the text
+		// is broken by core.Wrap's rules.
+		equal := true
+		ws, eq, gap, ok := l.fitWidths(wide, room, float64(boxGaps))
+		if !ok && len(narrow) > 0 && g.need != nil {
+			// A note beside the boxes gives back what it can: it is set
+			// as narrow as its own words allow, and the boxes try again,
+			// as a cut word in a box reads worse than a taller note.
+			for _, n := range narrow {
+				room += n.w
+				n.w, n.h = g.size(n.idx, min(n.w, l.narrowest(n.idx)))
+				room -= n.w
+			}
+			ws, eq, gap, ok = l.fitWidths(wide, room, float64(boxGaps))
+		}
+		if ok {
+			for i, n := range wide {
+				n.w, n.h = g.size(n.idx, ws[i])
+			}
+			equal = eq
+			l.gap[k] = gap
+		} else {
 			l.sizeEqual(wide, limit)
 		}
-		l.sameByClass(real)
+		l.sameByClass(real, equal)
 	}
 	return true
+}
+
+// narrowest is the narrowest node i can be with its words whole at any
+// step of its ladder, at least graph.minW.
+func (l *layout) narrowest(i int) float64 {
+	w := math.Inf(1)
+	for k := 0; ; k++ {
+		n, ok := l.g.need(i, k)
+		if !ok {
+			break
+		}
+		w = min(w, n)
+	}
+	return max(w, l.g.minW)
 }
 
 // sizeEqual sizes every node of a row's wide ones for the same limit.
@@ -647,8 +704,9 @@ func (l *layout) sizeEqual(wide []*gnode, limit float64) {
 	}
 }
 
-// sameByClass gives the nodes of one class in a row one size, the largest.
-func (l *layout) sameByClass(real []*gnode) {
+// sameByClass gives the nodes of one class in a row one height, the
+// largest, and when widths is set one width too.
+func (l *layout) sameByClass(real []*gnode, widths bool) {
 	g := l.g
 	wByClass, hByClass := map[int]float64{}, map[int]float64{}
 	for _, n := range real {
@@ -658,69 +716,122 @@ func (l *layout) sameByClass(real []*gnode) {
 	}
 	for _, n := range real {
 		c := g.class(n.idx)
-		n.w, n.h = wByClass[c], hByClass[c]
+		if widths {
+			n.w = wByClass[c]
+		}
+		n.h = hByClass[c]
 	}
 }
 
-// sizeWide sizes a row's wide nodes giving each whose words need more than
-// an equal share that width, and the others what is left between them. It
-// reports false, sizing nothing, when no node needs more, or when the row
-// would no longer fit (the others too narrow, or a class made as wide as
-// its widest member running past room): then every node has an equal
-// share and its text is made smaller or broken by the usual rules.
-func (l *layout) sizeWide(wide []*gnode, limit, room float64) bool {
+// fitWidths shares a row's room among its wide nodes by what their text
+// needs. It walks the nodes' ladders (graph.need) one step at a time and
+// takes the first step at which the row fits, trying at each step, in
+// order: boxes of a class one width with the usual gaps, then with tight
+// gaps, then each box its own width with the usual gaps, then tight. So a
+// row keeps its look (equal boxes, full text size) as long as it can, and
+// gives that up a little at a time rather than cut a word. The room left
+// over is then shared out (fill), so boxes with short text are not left
+// narrow and a box with a long word takes it from them.
+//
+// It returns each node's width, whether a class is one width, the gap
+// between boxes, and false when no step fits (or nodes give no need).
+func (l *layout) fitWidths(wide []*gnode, room, boxGaps float64) (ws []float64, equal bool, gap float64, ok bool) {
 	g := l.g
-	if g.whole == nil || len(wide) < 2 {
-		return false
+	if g.need == nil || len(wide) == 0 {
+		return nil, false, 0, false
 	}
-	need := map[*gnode]float64{}
-	grown, rest := 0.0, 0
-	for _, n := range wide {
-		if w := min(g.maxW, g.whole(n.idx)); w > limit {
-			need[n] = w
-			grown += w
-		} else {
-			rest++
-		}
+	// best[i] is the narrowest node i has been at any step so far: a
+	// ladder is not narrower at every step (full padding at a smaller size
+	// can be wider than tight padding at a larger), and a node is sized by
+	// its first step that fits (graph.size), wherever that is.
+	best := make([]float64, len(wide))
+	for i := range best {
+		best[i] = math.Inf(1)
 	}
-	if len(need) == 0 {
-		return false
-	}
-	share := g.maxW
-	if rest > 0 {
-		share = min(g.maxW, (room-grown)/float64(rest))
-	}
-	if share < g.minW {
-		return false
-	}
-	for _, n := range wide {
-		if w, ok := need[n]; ok {
-			n.w, n.h = g.size(n.idx, w)
-		} else {
-			if g.whole(n.idx) > share {
-				return false
+	for k := 0; ; k++ {
+		more := false
+		for i, n := range wide {
+			if w, ok := g.need(n.idx, k); ok {
+				best[i] = min(best[i], w)
+				more = true
 			}
-			n.w, n.h = g.size(n.idx, share)
+		}
+		if !more {
+			return nil, false, 0, false
+		}
+		for _, eq := range []bool{true, false} {
+			for _, gp := range []float64{gapNodes, gapTight} {
+				r := room + boxGaps*(gapNodes-gp)
+				if ws, ok := l.fill(wide, best, r, eq); ok {
+					return ws, eq, gp, true
+				}
+			}
 		}
 	}
-	// What the row takes once a class is as wide as its widest member.
-	byClass := map[int]float64{}
-	for _, n := range wide {
-		byClass[g.class(n.idx)] = max(byClass[g.class(n.idx)], n.w)
-	}
-	total := 0.0
-	for _, n := range wide {
-		total += byClass[g.class(n.idx)]
-	}
-	return total <= room+0.5
 }
 
-func sepGap(a, b *gnode) float64 {
+// fill gives each node at least its need and shares what room is left as
+// evenly as it can, up to graph.maxW: every node is raised to one common
+// width L where its need is less (water filling, L found by bisection).
+// With equal, the nodes of a class are one group, as wide as its widest
+// need. It reports false when the needs alone run past room or past maxW.
+func (l *layout) fill(wide []*gnode, need []float64, room float64, equal bool) ([]float64, bool) {
+	g := l.g
+	group := make([]float64, len(wide))
+	copy(group, need)
+	if equal {
+		byClass := map[int]float64{}
+		for i, n := range wide {
+			byClass[g.class(n.idx)] = max(byClass[g.class(n.idx)], need[i])
+		}
+		for i, n := range wide {
+			group[i] = byClass[g.class(n.idx)]
+		}
+	}
+	total := func(L float64) float64 {
+		t := 0.0
+		for _, w := range group {
+			t += min(g.maxW, max(w, L))
+		}
+		return t
+	}
+	for _, w := range group {
+		if w > g.maxW+0.01 {
+			return nil, false
+		}
+	}
+	if total(0) > room+0.5 {
+		return nil, false
+	}
+	lo, hi := 0.0, g.maxW
+	if total(hi) <= room {
+		lo = hi
+	} else {
+		for range 30 {
+			mid := (lo + hi) / 2
+			if total(mid) > room {
+				hi = mid
+			} else {
+				lo = mid
+			}
+		}
+	}
+	out := make([]float64, len(wide))
+	for i, w := range group {
+		out[i] = min(g.maxW, max(w, lo))
+	}
+	return out, true
+}
+
+func (l *layout) sepGap(a, b *gnode) float64 {
 	switch {
 	case a.dummy() && b.dummy():
 		return gapDummies
 	case a.dummy() || b.dummy():
 		return gapDummy
+	}
+	if a.layer < len(l.gap) {
+		return l.gap[a.layer]
 	}
 	return gapNodes
 }
@@ -796,14 +907,14 @@ func (l *layout) solveX() {
 		w := 0.0
 		for i, n := range row {
 			if i > 0 {
-				w += sepGap(row[i-1], n)
+				w += l.sepGap(row[i-1], n)
 			}
 			w += n.leftExt() + n.rightExt()
 		}
 		x := (lo+hi)/2 - w/2
 		for i, n := range row {
 			if i > 0 {
-				x += sepGap(row[i-1], n)
+				x += l.sepGap(row[i-1], n)
 			}
 			n.x = x + n.leftExt()
 			x += n.leftExt() + n.rightExt()
@@ -856,7 +967,7 @@ func (l *layout) solveX() {
 				}
 			}
 			if i > 0 {
-				seps[i-1] = row[i-1].rightExt() + sepGap(row[i-1], n) + n.leftExt()
+				seps[i-1] = row[i-1].rightExt() + l.sepGap(row[i-1], n) + n.leftExt()
 			}
 		}
 		if len(row) == 0 {
@@ -989,9 +1100,12 @@ type seg struct {
 }
 
 type channel struct {
-	segs     []*seg
-	tracks   int
-	topRes   float64
+	segs   []*seg
+	tracks int
+	topRes float64
+	// botRes is room kept at the bottom for labels just above the next
+	// row's boxes (a fan's).
+	botRes   float64
 	labelGap float64
 	top, h   float64
 }
@@ -1093,6 +1207,10 @@ func (l *layout) route() {
 		if len(es) < 2 {
 			continue
 		}
+		if len(es) >= 3 {
+			l.fanOut(n, es)
+			continue
+		}
 		x := n.absX()
 		for _, s := range []int{-1, 1} {
 			if n.sideUsed[side01(s)] {
@@ -1154,6 +1272,34 @@ func (l *layout) route() {
 			x = nx
 		}
 		es[0].straight = math.Min(hi, math.Max(lo, x))
+	}
+	// So does a branch that leaves the bottom of a box with several, to a
+	// box just off centre below it: boxes of a row sized each to its own
+	// text (fitWidths) seldom centre exactly under their source, and a
+	// jog of a few units reads as a slip. It enters the box a little off
+	// its middle instead; the branches to the sides are unchanged.
+	for n, es := range outs {
+		if len(es) < 2 {
+			continue
+		}
+		for _, e := range es {
+			if e.exit != 0 || len(e.chain) != 2 || ins[e.chain[1]] != 1 {
+				continue
+			}
+			if e.fan {
+				// A fan line whose port lies over its target drops
+				// straight in.
+				v := e.chain[1]
+				if math.Abs(e.depart-v.absX()) < v.w/2-14 {
+					e.straight = e.depart
+				}
+				continue
+			}
+			nx, vx := n.absX(), e.chain[1].absX()
+			if d := math.Abs(nx - vx); d >= 0.5 && d <= 12 && d < e.chain[1].w/2-18 {
+				e.straight = nx
+			}
+		}
 	}
 	// A node's only line that heads off to one side (round the other
 	// boxes of the next row, to a row further down) leaves from the end
@@ -1235,6 +1381,11 @@ func (l *layout) routeForward(e *gedge) {
 	cur := cols[0]
 	start := 0
 	net := fmt.Sprintf("out:%p", u)
+	if e.fan {
+		// A fan's lines keep apart: each its own run, never merged into
+		// one bus with its sisters.
+		net = fmt.Sprintf("fan:%p", e)
+	}
 	if e.exit != 0 {
 		s := float64(e.exit)
 		vx := u.absX() + s*u.w/2
@@ -1271,6 +1422,44 @@ func (l *layout) routeForward(e *gedge) {
 	}
 	refs = append(refs, rpt{x: cur, n: v, frac: 0})
 	e.refs = refs
+}
+
+// fanOut sends three or more lines out of n's bottom, each from a port of
+// its own: in the order of their targets left to right, each as near
+// over its target as the bottom allows and at least fanSep from the
+// next. With their own tracks (routeForward) they cross nothing on the
+// way down, and each label sits on its line just above its target
+// (placeLabels), where there is no doubt which line it names. Lines that
+// all left one point, or out of the sides, could not each carry a label
+// a reader could match to them once there were more than two.
+func (l *layout) fanOut(n *gnode, es []*gedge) {
+	sort.SliceStable(es, func(i, j int) bool { return es[i].chain[1].absX() < es[j].chain[1].absX() })
+	in := 8.0
+	if l.g.inset != nil && n.idx >= 0 {
+		in = l.g.inset(n.idx)
+	}
+	lo, hi := n.absX()-n.w/2+in, n.absX()+n.w/2-in
+	k := len(es)
+	sep := min(fanSep, (hi-lo)/float64(k-1))
+	p := make([]float64, k)
+	for i, e := range es {
+		p[i] = math.Min(hi, math.Max(lo, e.chain[1].absX()))
+	}
+	for i := 1; i < k; i++ {
+		p[i] = math.Max(p[i], p[i-1]+sep)
+	}
+	p[k-1] = math.Min(p[k-1], hi)
+	for i := k - 2; i >= 0; i-- {
+		p[i] = math.Min(p[i], p[i+1]-sep)
+	}
+	if p[0] < lo-0.01 {
+		for i := range p {
+			p[i] = lo + float64(i)*sep
+		}
+	}
+	for i, e := range es {
+		e.fan, e.exit, e.depart = true, 0, math.Round(p[i]*2)/2
+	}
 }
 
 // clearAcross says whether a line can run straight across from a side of
@@ -1333,13 +1522,19 @@ func (l *layout) routeBack(e *gedge, lane float64) {
 // placeY gives each channel its tracks and each row its height and place.
 func (l *layout) placeY() {
 	g := l.g
-	// Channels where a label sits under a box need room at the top.
-	lab := map[int]float64{}
+	// Channels where a label sits under a box need room at the top; where
+	// a fan's label sits over the next row's box, at the bottom.
+	lab, fanLab := map[int]float64{}, map[int]float64{}
 	for _, e := range g.edges {
 		if e.label == "" || e.attach {
 			continue
 		}
-		h := wrapBlock(e.label, labelSize, 110, e.labelBold).h
+		h := l.labelBlock(e).h
+		if e.fan {
+			k := l.nodes[e.to].layer - 1
+			fanLab[k] = max(fanLab[k], h+fanLabelLift+3)
+			continue
+		}
 		if g.labelMid {
 			for k := 0; k+1 < len(e.chain); k++ {
 				lab[e.chain[k].layer] = max(lab[e.chain[k].layer], h+14)
@@ -1351,6 +1546,7 @@ func (l *layout) placeY() {
 	}
 	for c, ch := range l.chans {
 		ch.topRes = max(12, lab[c])
+		ch.botRes = fanLab[c]
 		l.assignTracks(ch)
 	}
 	bandH := make([]float64, len(l.layers))
@@ -1378,7 +1574,7 @@ func (l *layout) placeY() {
 		y += bandH[k]
 		ch := l.chans[k]
 		if ch == nil {
-			ch = &channel{topRes: max(12, lab[k])}
+			ch = &channel{topRes: max(12, lab[k]), botRes: fanLab[k]}
 		}
 		ch.top = y
 		if k == len(l.layers)-1 {
@@ -1386,7 +1582,7 @@ func (l *layout) placeY() {
 				ch.h = ch.topRes + float64(ch.tracks-1)*trackSep + 6
 			}
 		} else {
-			ch.h = max(g.baseGap, lab[k]+16, ch.topRes+float64(max(0, ch.tracks-1))*trackSep+16)
+			ch.h = max(g.baseGap, lab[k]+16, ch.topRes+float64(max(0, ch.tracks-1))*trackSep+16) + ch.botRes
 		}
 		l.setTracks(ch)
 		y += ch.h
@@ -1400,9 +1596,9 @@ func (l *layout) setTracks(ch *channel) {
 	}
 	span := float64(ch.tracks-1) * trackSep
 	lo := ch.top + ch.topRes
-	hi := ch.top + ch.h - 16 - span
+	hi := ch.top + ch.h - 16 - ch.botRes - span
 	start := math.Max(lo, (lo+hi)/2)
-	if ch.top+ch.h-16-span < lo {
+	if hi < lo {
 		start = lo
 	}
 	for _, s := range ch.segs {
@@ -1473,30 +1669,74 @@ func (l *layout) assignTracks(ch *channel) {
 	}
 }
 
-// placeLabels puts each line's label where it collides with nothing.
-func (l *layout) placeLabels() {
-	var boxes []box
-	for _, n := range l.all {
-		if !n.dummy() {
-			boxes = append(boxes, n.bbox())
+// labelBlock is e's label wrapped: a fan's about as wide as its target at
+// most, so the labels of neighbouring targets keep apart.
+func (l *layout) labelBlock(e *gedge) textBlock {
+	max := 110.0
+	if e.fan {
+		// It may reach a little into the gaps either side, half of the
+		// narrowest, which its neighbours' labels leave it.
+		max = min(max, l.nodes[e.to].w+gapTight-6)
+	}
+	return wrapBlock(e.label, labelSize, max, e.labelBold)
+}
+
+// alongRoute is places for a w by h label along route r, every few units
+// of every leg, from its start: across the leg and on either side of it.
+func alongRoute(r []core.Pt, w, h float64) []box {
+	var out []box
+	for k := 0; k+1 < len(r); k++ {
+		a, b := r[k], r[k+1]
+		n := int(dist(a, b)/4) + 1
+		for i := 0; i <= n; i++ {
+			p := core.Pt{X: a.X + (b.X-a.X)*float64(i)/float64(n), Y: a.Y + (b.Y-a.Y)*float64(i)/float64(n)}
+			if math.Abs(a.X-b.X) < 0.5 { // vertical
+				out = append(out, box{p.X + 5, p.Y - h/2, w, h}, box{p.X - 5 - w, p.Y - h/2, w, h}, box{p.X - w/2, p.Y - h/2, w, h})
+			} else {
+				out = append(out, box{p.X - w/2, p.Y - h - 2, w, h}, box{p.X - w/2, p.Y + 2, w, h}, box{p.X - w/2, p.Y - h/2, w, h})
+			}
 		}
 	}
-	var segs [][2]core.Pt
+	return out
+}
+
+// placeLabels puts each line's label where it collides with nothing.
+func (l *layout) placeLabels() {
+	// Every node, those beside another (notes, side branches) included,
+	// where it is drawn.
+	var boxes []box
+	for _, n := range l.nodes {
+		boxes = append(boxes, n.bbox())
+	}
+	// segs are every line's legs, with the edge each belongs to.
+	type leg struct {
+		a, b core.Pt
+		e    *gedge
+	}
+	var segs []leg
 	for _, e := range l.g.edges {
 		for i := 0; i+1 < len(e.route); i++ {
-			segs = append(segs, [2]core.Pt{e.route[i], e.route[i+1]})
+			segs = append(segs, leg{e.route[i], e.route[i+1], e})
 		}
 	}
 	for _, e := range l.g.edges {
 		if e.label == "" || len(e.route) < 2 {
 			continue
 		}
-		tb := wrapBlock(e.label, labelSize, 110, e.labelBold)
+		tb := l.labelBlock(e)
 		w, h := tb.w+4, tb.h
 		var cands []box
 		add := func(x, y float64) { cands = append(cands, box{x, y, w, h}) }
 		r := e.route
-		if e.attach {
+		if e.fan {
+			// On its own line just above its target's arrowhead: across
+			// the line (over a halo of the background), or beside it.
+			end := r[len(r)-1]
+			y := end.Y - h - fanLabelLift
+			add(end.X-w/2, y)
+			add(end.X+4, y)
+			add(end.X-4-w, y)
+		} else if e.attach {
 			a, b := r[0], r[len(r)-1]
 			mx := (a.X + b.X) / 2
 			add(mx-w/2, a.Y-h-2)
@@ -1590,8 +1830,7 @@ func (l *layout) placeLabels() {
 				}
 			}
 		}
-		bestScore, best := math.MaxInt, cands[0]
-		for _, cb := range cands {
+		score := func(cb box) int {
 			s := 0
 			if cb.X < 2 || cb.R() > core.Width-2 || cb.Y < 0 || cb.B() > l.H {
 				s += 1000
@@ -1602,12 +1841,32 @@ func (l *layout) placeLabels() {
 				}
 			}
 			for _, sg := range segs {
-				if segHitsBox(sg[0], sg[1], cb.grow(1)) {
+				// A fan's label is meant to sit across its own line, over
+				// a halo: only other lines count against a place.
+				if e.fan && sg.e == e {
+					continue
+				}
+				if segHitsBox(sg.a, sg.b, cb.grow(1)) {
 					s++
 				}
 			}
-			if s < bestScore {
+			return s
+		}
+		bestScore, best := math.MaxInt, cands[0]
+		for _, cb := range cands {
+			if s := score(cb); s < bestScore {
 				bestScore, best = s, cb
+			}
+		}
+		if bestScore >= 1000 {
+			// Every usual place is taken or off the figure: look along
+			// the whole of the line, across it and beside it, for the
+			// first place that is clear, so a label is never drawn over
+			// a box or another label, or cut off at the edge.
+			for _, cb := range alongRoute(r, w, h) {
+				if s := score(cb); s < bestScore {
+					bestScore, best = s, cb
+				}
 			}
 		}
 		lb := label{text: tb, at: best}

@@ -91,3 +91,18 @@ func TestFitWordsShrinksBeforeBreaking(t *testing.T) {
 		t.Errorf("an impossible fit: %v", got)
 	}
 }
+
+// WidestPiece measures a word by its pieces between its own hyphens,
+// dashes and slashes, where Wrap may break it adding nothing; a piece too
+// short to stand alone stays with its neighbour.
+func TestWidestPieceSplitsAtTheWordsOwnBreaks(t *testing.T) {
+	if got, want := WidestPiece("organ-threatening", 12, true), TextWidth("threatening", 12, true); got != want {
+		t.Errorf("organ-threatening: %v, want the width of \"threatening\" %v", got, want)
+	}
+	if got, want := WidestPiece("IV-fluid", 12, false), TextWidth("IV-fluid", 12, false); got != want {
+		t.Errorf("IV-fluid (two letters before the hyphen) is split: %v, want %v", got, want)
+	}
+	if got, want := WidestPiece("plain words", 12, false), WidestWord("plain words", 12, false); got != want {
+		t.Errorf("without a hyphen: %v, want %v", got, want)
+	}
+}

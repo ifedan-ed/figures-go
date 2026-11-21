@@ -89,7 +89,7 @@ func TestLimitsAreToldInWords(t *testing.T) {
 	for _, want := range []string{
 		"- title: what the figure shows, in at most 10 words.",
 		"text (at most 20 words), shape: start|step|decision|end|note",                        // flowchart
-		"label? (at most 4 words)}] for links",                                                // flowchart edges
+		"label? (at most 4 words)}] are the other",                                            // flowchart edges
 		"A cell is text (at most 15 words in a table of two columns, 10 in three, 8 in four)", // comparison table
 		"nodes: [{id, text (at most 10 words), tone?, input?}]",                               // pathway
 		"children?: [{text (at most 10 words)",                                                // concept map
