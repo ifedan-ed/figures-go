@@ -106,3 +106,17 @@ func TestWidestPieceSplitsAtTheWordsOwnBreaks(t *testing.T) {
 		t.Errorf("without a hyphen: %v, want %v", got, want)
 	}
 }
+
+// A width below zero (a nested box narrower than its padding) must end:
+// every piece is a forced break, so the figure is refused, never a loop.
+func TestWrapNegativeWidthEnds(t *testing.T) {
+	lines := Wrap("Calendars and contacts", 11, -9.4, false)
+	if len(lines) == 0 || len(lines) > 30 {
+		t.Fatalf("got %d lines", len(lines))
+	}
+	for _, l := range lines {
+		if l == "" || l == ForcedBreak {
+			t.Fatalf("empty piece in %q", lines)
+		}
+	}
+}

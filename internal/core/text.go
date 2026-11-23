@@ -104,7 +104,11 @@ func Wrap(s string, size, max float64, bold bool) []string {
 				out = append(out, line)
 				line = ""
 			}
-			for TextWidth(w, size, bold) > max {
+			// w != "": when max is below zero (a box narrower than its
+			// padding) even an empty rest is "too wide", and without this
+			// the loop appended empty forced lines until memory ran out
+			// (36 GB on 2026-11-23). Each pass takes at least one rune.
+			for w != "" && TextWidth(w, size, bold) > max {
 				head, rest := breakWord(w, size, max, bold)
 				out = append(out, head)
 				w = rest
